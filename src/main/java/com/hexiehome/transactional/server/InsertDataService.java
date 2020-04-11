@@ -23,8 +23,7 @@ public class InsertDataService extends BaseServer {
     @Autowired
     private SaveDataMapper saveDataMapper;
 
-    //    @Transactional(rollbackFor = Exception.class, transactionManager = "transactionalTransactionManager", propagation = Propagation.REQUIRED)
-    @Transactional(transactionManager = "transactionalTransactionManager", propagation = Propagation.REQUIRED)
+    @Transactional(rollbackFor = Exception.class, transactionManager = "transactionalTransactionManager", propagation = Propagation.REQUIRED)
     public void saveData(TransactionInfo transactionInfo, List<UserInfo> userInfos, Integer type) throws Exception {
         Exception ex = null;
         try {
