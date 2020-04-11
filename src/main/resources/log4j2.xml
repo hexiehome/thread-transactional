@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xml>
+<!-- Log4j 2.x 配置文件。每30秒自动检查和应用配置文件的更新； -->
+<Configuration status="warn" monitorInterval="30">
+
+    <Properties>
+        <Property name="LOG_LEVEL">INFO</Property>
+        <Property name="LOG_PATH">../log/</Property>
+        <Property name="LOG_FILE">canal-dbsync</Property>
+        <Property name="LOG_FILTER_FILE">canal-dbsync-filter</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- 输出到控制台 -->
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout>
+                <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%p] [%t] %m (%F:%L)%n</pattern>
+            </PatternLayout>
+            <ThresholdFilter level="${LOG_LEVEL}"/>
+        </Console>
+
+        <!-- 输出到文件，按天或者超过100MB分割 -->
+        <RollingFile name="RollingFile" fileName="${LOG_PATH}${LOG_FILE}.log"
+                     filePattern="${LOG_PATH}$${date:yyyy-MM}/${LOG_FILE}-%d{yyyy-MM-dd}-%i.log">
+            <PatternLayout>
+                <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%p] [%t] %m (%F:%L)%n</pattern>
+            </PatternLayout>
+            <ThresholdFilter level="${LOG_LEVEL}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy/>
+                <SizeBasedTriggeringPolicy size="100 MB"/>
+            </Policies>
+
+            <!-- 最多备份30天以内||日志文件大小达到100GB的日志||文件数量超过100个 此处为策略限制，Delete中可以按自己需要用正则表达式编写 -->
+            <DefaultRolloverStrategy>
+                <Delete basePath="${LOG_PATH}" maxDepth="1">
+                    <IfFileName glob="mangrove-*.log"/>
+                    <IfLastModified age="30d"/>
+                    <IfAccumulatedFileSize exceeds="100 GB"/>
+                    <IfAccumulatedFileCount exceeds="100"/>
+                </Delete>
+            </DefaultRolloverStrategy>
+
+        </RollingFile>
+
+        <!-- 输出到文件，关键字过滤，按天或者超过100MB分割 -->
+        <RollingFile name="RollingFileFilter" fileName="${LOG_PATH}${LOG_FILTER_FILE}.log"
+                     filePattern="${LOG_PATH}$${date:yyyy-MM}/${LOG_FILTER_FILE}-%d{yyyy-MM-dd}-%i.log">
+            <!-- RegexFilter - 正则表达式过滤器 -->
+            <!-- ThresholdFilter - 日志等级过滤器 -->
+            <!-- TimeFilter - 时间过滤器 -->
+            <Filters>
+                <RegexFilter regex=".*渝A00001.*" onMatch="NEUTRAL"
+                             onMismatch="DENY"/>
+            </Filters>
+            <PatternLayout>
+                <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%p] [%t] %m (%F:%L)%n</pattern>
+            </PatternLayout>
+            <Policies>
+                <TimeBasedTriggeringPolicy/>
+                <SizeBasedTriggeringPolicy size="100 MB"/>
+            </Policies>
+        </RollingFile>
+    </Appenders>
+
+    <Loggers>
+        <!-- 全局配置 -->
+        <Root level="${LOG_LEVEL}">
+            <AppenderRef ref="Console"/>
+            <AppenderRef ref="RollingFile"/>
+        </Root>
+        <Logger name="com.hexiehome" level="TRACE" additivity="false">
+            <AppenderRef ref="Console"/>
+            <AppenderRef ref="RollingFile"/>
+            <AppenderRef ref="RollingFileFilter"/>
+        </Logger>
+        <logger name="org.springframework" level="INFO"></logger>
+        <logger name="org.mybatis" level="INFO"></logger>
+        <logger name="org.apache.ibatis.logging" level="INFO"></logger>
+    </Loggers>
+</Configuration>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hexiehome.transactional.dao.SaveDataMapper">
+
+
+    <!-- 多条插入数据 -->
+    <insert id="saveDate">
+        INSERT INTO user_info (`name`,sex) values
+        <foreach collection="userInfos" separator="," index="i" item="info">
+            (#{info.name},#{info.sex})
+        </foreach>
+    </insert>
+
+</mapper>
