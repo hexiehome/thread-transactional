@@ -1,6 +1,7 @@
 package com.hexiehome.transactional;
 
 import org.apache.logging.log4j.core.config.Configurator;
+import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -21,7 +22,9 @@ public class ThreadTransactional {
 
     public static void main(String[] args) {
         log4jConfigure();
-        SpringApplication.run(ThreadTransactional.class, args);
+        SpringApplication run = new SpringApplication(ThreadTransactional.class);
+        run.setBannerMode(Banner.Mode.LOG);
+        run.run(args);
     }
 
 
