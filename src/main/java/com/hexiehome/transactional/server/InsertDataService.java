@@ -1,7 +1,8 @@
 package com.hexiehome.transactional.server;
 
+import com.hexiehome.transactional.core.CoordinationContext;
+import com.hexiehome.transactional.core.WorkerBehavior;
 import com.hexiehome.transactional.dao.SaveDataMapper;
-import com.hexiehome.transactional.domain.TransactionInfo;
 import com.hexiehome.transactional.domain.UserInfo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,21 +25,23 @@ public class InsertDataService extends BaseServer {
     private SaveDataMapper saveDataMapper;
 
     @Transactional(rollbackFor = Exception.class, transactionManager = "transactionalTransactionManager", propagation = Propagation.REQUIRED)
-    public void saveData(TransactionInfo transactionInfo, List<UserInfo> userInfos, Integer type) throws Exception {
+    public void saveData(CoordinationContext context, List<UserInfo> userInfos, WorkerBehavior behavior) throws Exception {
         Exception ex = null;
         try {
-            saveDataMapper.saveDate(userInfos);
-            transactionInfo.getThreadResult().put(Boolean.TRUE);
-            if (type % 3 == 0) {
-//                System.out.println(1 / 0);
+            if (behavior.artificialSleepMs() > 0) {
+                Thread.sleep(behavior.artificialSleepMs());
             }
+            if (behavior.forceFailure()) {
+                throw new IllegalStateException("forced failure for teaching scenario");
+            }
+            saveDataMapper.saveDate(userInfos);
+            context.getWorkerResults().put(Boolean.TRUE);
         } catch (Exception e) {
             log.error("saveData error ", e);
-            transactionInfo.getThreadResult().put(Boolean.FALSE);
+            context.getWorkerResults().put(Boolean.FALSE);
             ex = e;
         } finally {
-            // 执行完成 等待主线程通知回滚
-            handleException(transactionInfo, ex);
+            awaitCoordinatorDecision(context, ex);
         }
     }
 }

@@ -1,31 +1,25 @@
 package com.hexiehome.transactional.server;
 
-import com.hexiehome.transactional.domain.TransactionInfo;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.hexiehome.transactional.core.CoordinationContext;
+import lombok.extern.slf4j.Slf4j;
 
-/**
- * @author cmd
- * @data 2020/4/10 19:27
- */
+@Slf4j
 public abstract class BaseServer {
-    private Logger logger = LoggerFactory.getLogger(BaseServer.class);
 
-    protected void handleException(TransactionInfo transactionInfo, Exception ex) throws Exception {
-        if (!transactionInfo.isMultiThreading()) {
-            if (ex != null) {
-                throw ex;
+    protected void awaitCoordinatorDecision(CoordinationContext context, Exception workerException) throws Exception {
+        if (!context.isMultiThread()) {
+            if (workerException != null) {
+                throw workerException;
             }
             return;
         }
-        // 执行完成 等待主线程通知回滚
-        transactionInfo.getThreadLatch().countDown();
-        // 等待主线程通知
-        transactionInfo.getMainLatch().await();
-        if (transactionInfo.getRollBack().getIsRollBack()) {
-            // 其他线程出现异常 需要回滚
-            logger.error("其他线程出现异常 需要连带回滚事务");
-            throw ex == null ? new RuntimeException("其他线程出现异常 需要连带回滚") : ex;
+        context.getWorkerCompletionSignal().countDown();
+        context.getCoordinatorSignal().await();
+        if (context.getRollbackRequired().get()) {
+            log.error("runId={} detected rollback decision, raising worker exception", context.getRunId());
+            throw workerException == null
+                    ? new RuntimeException("rollback required by coordinator decision")
+                    : workerException;
         }
     }
 }

@@ -1,23 +1,21 @@
 ﻿#!/bin/sh
 
-export JAVA_OPTS="-Xms1024m -Xmx1024m -Xss256k"
-export JAVA_OPTS="$JAVA_OPTS -Duser.timezone=Asia/Chongqing -Dclient.encoding.override=UTF-8 -Dfile.encoding=UTF-8"
+APP_NAME="thread-transactional-v1.0.0.jar"
+JAVA_OPTS="-Xms512m -Xmx512m -Xss256k -Duser.timezone=UTC -Dfile.encoding=UTF-8"
 
-echo "startup : canal-dbsync-v1.0.0.jar"
-echo "step 1 : shutdown alive canal-dbsync server"
-pidlist=`ps -ef|grep canal-dbsync-v1.0.0.jar|grep -v grep|awk '{print $2}'`
+echo "startup : ${APP_NAME}"
+echo "step 1 : stop alive process"
+pidlist=`ps -ef|grep ${APP_NAME}|grep -v grep|awk '{print $2}'`
 if [ "$pidlist" = "" ]
-	then
-		echo "no canal-dbsync server pid alive !"
+then
+    echo "no process alive"
 else
-	echo "canal-dbsync server pid list : $pidlist"
-	kill -9 $pidlist
-	echo "kill canal-dbsync server success $pidlist"
+    echo "process pid list : $pidlist"
+    kill -9 $pidlist
 fi
-echo "step 2 : startup canal-dbsync server"
+
+echo "step 2 : startup process"
 executeDir=`dirname $0`
-echo "executeDir : $executeDir"
-cd $executeDir
-cd ../dist_lib
-setsid java -jar -Dspring.config.location=./../config/application.properties -Dlogging.config=./../config/log4j2.xml ./canal-dbsync-v1.0.0.jar >/dev/null &
-echo "startup canal-dbsync server success"
+cd "$executeDir"/../dist_lib || exit 1
+setsid java ${JAVA_OPTS} -jar -Dspring.config.location=./../config/application.properties -Dlogging.config=./../config/log4j2.xml ./${APP_NAME} >/dev/null &
+echo "startup success"

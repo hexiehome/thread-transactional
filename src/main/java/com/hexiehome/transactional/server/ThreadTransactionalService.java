@@ -1,114 +1,182 @@
 package com.hexiehome.transactional.server;
 
-import com.google.common.collect.Lists;
-import com.hexiehome.transactional.domain.RollBack;
-import com.hexiehome.transactional.domain.TransactionInfo;
+import com.hexiehome.transactional.core.CoordinationContext;
+import com.hexiehome.transactional.core.CoordinationDecision;
+import com.hexiehome.transactional.core.CoordinationDecisionEngine;
+import com.hexiehome.transactional.core.WorkerBehavior;
+import com.hexiehome.transactional.domain.ScenarioInfo;
+import com.hexiehome.transactional.domain.ScenarioRequest;
+import com.hexiehome.transactional.domain.ScenarioResult;
+import com.hexiehome.transactional.domain.ScenarioType;
 import com.hexiehome.transactional.domain.UserInfo;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
-/**
- * 多线程事务管理器[通过线程通信解决多线程事务提交问题]
- * 注：
- * 1.多线程入库仅支持同一种操作:比如单insert/单update,由于数据库的事务隔离级别,不能对同一条数据同时insert和update,会导致死锁
- * 2.如果非要使用多线程同时insert和update,则需要把事务隔离级别降为READ_COMMITTED,但是会出现先update导致失败问题(注解不存在)
- * 3.MySQL默认事务隔离级别:REPEATABLE_READ
- *
- * @author cmd
- * @data 2020/4/10 19:10
- */
 @Slf4j
 @Service
 public class ThreadTransactionalService {
     private static final int THREAD_COUNT = Runtime.getRuntime().availableProcessors() * 2 + 1;
-    private final int batchSize = 5;
-    ExecutorService executor = Executors.newFixedThreadPool(THREAD_COUNT);
-    @Autowired
-    private InsertDataService insertDataService;
+    private static final int DEFAULT_BATCH_SIZE = 5;
 
-    public void handleMessage(List<UserInfo> userInfos) {
+    private final ExecutorService executor = Executors.newFixedThreadPool(THREAD_COUNT);
+    private final InsertDataService insertDataService;
+    private final CoordinationDecisionEngine decisionEngine = new CoordinationDecisionEngine();
+
+    @Value("${transactional.coordination.timeout-seconds:10}")
+    private int defaultTimeoutSeconds;
+
+    public ThreadTransactionalService(InsertDataService insertDataService) {
+        this.insertDataService = insertDataService;
+    }
+
+    public List<ScenarioInfo> listScenarios() {
+        List<ScenarioInfo> infos = new ArrayList<>();
+        infos.add(new ScenarioInfo(ScenarioType.ALL_SUCCESS, "All worker batches succeed", "COMMIT"));
+        infos.add(new ScenarioInfo(ScenarioType.PARTIAL_FAILURE, "One worker is forced to fail", "ROLLBACK_WORKER_FAILURE"));
+        infos.add(new ScenarioInfo(ScenarioType.TIMEOUT, "Workers exceed configured coordination timeout", "ROLLBACK_TIMEOUT"));
+        return infos;
+    }
+
+    public ScenarioResult runScenario(ScenarioRequest request) {
+        ScenarioType scenario = request.scenario() == null ? ScenarioType.ALL_SUCCESS : request.scenario();
+        int size = request.size() == null || request.size() < 1 ? DEFAULT_BATCH_SIZE : request.size();
+        int batchSize = request.batchSize() == null || request.batchSize() < 1 ? DEFAULT_BATCH_SIZE : request.batchSize();
+        int timeoutSeconds = request.timeoutSeconds() == null || request.timeoutSeconds() < 1
+                ? defaultTimeoutSeconds
+                : request.timeoutSeconds();
+
+        return handleMessage(generateUsers(size), scenario, batchSize, timeoutSeconds);
+    }
+
+    public ScenarioResult handleMessage(List<UserInfo> userInfos, ScenarioType scenarioType, int batchSize, int timeoutSeconds) {
         if (CollectionUtils.isEmpty(userInfos)) {
-            log.warn("handleMessage data is null");
-            return;
+            return new ScenarioResult("n/a", scenarioType, CoordinationDecision.ROLLBACK_ORCHESTRATION_EXCEPTION, 0, 0, "input list is empty");
         }
-        // 主线程监控
-        CountDownLatch mainLatch = new CountDownLatch(1);
-        // 子线程监控
-        CountDownLatch threadLatch = null;
-        // 事务共享管理器
-        RollBack rollBack = new RollBack(false);
-        BlockingDeque<Boolean> threadResult = new LinkedBlockingDeque<>(THREAD_COUNT);
-        TransactionInfo transactionInfo = new TransactionInfo();
-        transactionInfo.setThreadResult(threadResult);
-        transactionInfo.setRollBack(rollBack);
-        transactionInfo.setMainLatch(mainLatch);
+
+        String runId = UUID.randomUUID().toString();
+        CoordinationContext context = new CoordinationContext();
+        context.setRunId(runId);
+        context.setCoordinatorSignal(new CountDownLatch(1));
+
+        List<List<UserInfo>> partitions = partition(userInfos, batchSize);
+        context.setMultiThread(partitions.size() > 1);
+        context.setWorkerCompletionSignal(new CountDownLatch(partitions.size()));
+
+        log.info("stage=scenario-start runId={} scenario={} batches={} timeoutSeconds={}",
+                runId, scenarioType, partitions.size(), timeoutSeconds);
 
         try {
-            if (userInfos.size() < batchSize) {
-                insertDataService.saveData(transactionInfo, userInfos, userInfos.size());
-            } else {
-                // 拆分大小为batchSize一个存储
-                transactionInfo.setMultiThreading(true);
-                List<List<UserInfo>> arrayList = Lists.partition(userInfos, batchSize);
-                threadLatch = new CountDownLatch(arrayList.size());
-                transactionInfo.setThreadLatch(threadLatch);
-                for (List<UserInfo> infos : arrayList) {
-                    // 这里会出现线程池不够的情况
-                    executor.submit(new HandleTask(transactionInfo, infos));
-                }
+            for (int i = 0; i < partitions.size(); i++) {
+                int workerIndex = i;
+                List<UserInfo> users = partitions.get(i);
+                executor.submit(() -> executeWorker(context, users, scenarioType, workerIndex));
             }
 
-            // 判断子线程是否成功
-            if (threadLatch != null) {
-                // 等待子线程执行完毕
-                boolean await = threadLatch.await(10, TimeUnit.SECONDS);
-                if (await) {
-                    while (threadResult.size() > 0) {
-                        final Boolean re = threadResult.take();
-                        if (!re) {
-                            rollBack.setIsRollBack(true);
-                            break;
-                        }
-                    }
-                } else {
-                    // 超时 直接回滚
-                    rollBack.setIsRollBack(true);
-                }
+            boolean finished = context.getWorkerCompletionSignal().await(timeoutSeconds, TimeUnit.SECONDS);
+            int successCount = drainSuccessCount(context, partitions.size());
+            CoordinationDecision decision = decisionEngine.decide(finished, successCount, partitions.size());
+
+            if (decision != CoordinationDecision.COMMIT) {
+                context.getRollbackRequired().set(true);
             }
+            context.setDecision(decision);
+
+            log.info("stage=decision runId={} decision={} successWorkers={} expectedWorkers={}",
+                    runId, decision, successCount, partitions.size());
+
+            return new ScenarioResult(
+                    runId,
+                    scenarioType,
+                    decision,
+                    partitions.size(),
+                    successCount,
+                    "scenario completed with coordinator decision"
+            );
         } catch (Exception e) {
-            log.error("handleMessage error ", e);
-            // 主线程发生异常 也要回滚
-            rollBack.setIsRollBack(true);
+            context.getRollbackRequired().set(true);
+            context.setDecision(CoordinationDecision.ROLLBACK_ORCHESTRATION_EXCEPTION);
+            log.error("stage=orchestration-error runId={} message={}", runId, e.getMessage(), e);
+            return new ScenarioResult(
+                    runId,
+                    scenarioType,
+                    CoordinationDecision.ROLLBACK_ORCHESTRATION_EXCEPTION,
+                    partitions.size(),
+                    0,
+                    "orchestration exception: " + e.getMessage()
+            );
         } finally {
-            mainLatch.countDown();
+            context.getCoordinatorSignal().countDown();
+            log.info("stage=scenario-end runId={} decision={}", runId, context.getDecision());
         }
     }
 
-    private AtomicInteger type = new AtomicInteger(0);
-
-    private class HandleTask implements Runnable {
-        private TransactionInfo transactionInfo;
-        private List<UserInfo> userInfos;
-
-        private HandleTask(TransactionInfo transactionInfo, List<UserInfo> userInfos) {
-            this.transactionInfo = transactionInfo;
-            this.userInfos = userInfos;
+    private void executeWorker(CoordinationContext context, List<UserInfo> users, ScenarioType scenarioType, int workerIndex) {
+        try {
+            WorkerBehavior behavior = behaviorFor(scenarioType, workerIndex);
+            log.info("stage=worker-start runId={} worker={} forcedFailure={} sleepMs={}",
+                    context.getRunId(), workerIndex, behavior.forceFailure(), behavior.artificialSleepMs());
+            insertDataService.saveData(context, users, behavior);
+            log.info("stage=worker-success runId={} worker={}", context.getRunId(), workerIndex);
+        } catch (Exception e) {
+            log.error("stage=worker-failed runId={} worker={} message={}",
+                    context.getRunId(), workerIndex, e.getMessage());
         }
+    }
 
-        @Override
-        public void run() {
-            try {
-                log.info("HandleTask start");
-                insertDataService.saveData(transactionInfo, userInfos, type.incrementAndGet());
-            } catch (Exception e) {
-                e.printStackTrace();
+    private WorkerBehavior behaviorFor(ScenarioType scenarioType, int workerIndex) {
+        if (scenarioType == ScenarioType.PARTIAL_FAILURE && workerIndex == 0) {
+            return new WorkerBehavior(true, 0);
+        }
+        if (scenarioType == ScenarioType.TIMEOUT) {
+            return new WorkerBehavior(false, TimeUnit.SECONDS.toMillis(defaultTimeoutSeconds + 2L));
+        }
+        return new WorkerBehavior(false, 0);
+    }
+
+    private int drainSuccessCount(CoordinationContext context, int expectedWorkers) {
+        int success = 0;
+        for (int i = 0; i < expectedWorkers; i++) {
+            Boolean result = context.getWorkerResults().poll();
+            if (Boolean.TRUE.equals(result)) {
+                success++;
             }
         }
+        return success;
+    }
+
+    private List<List<UserInfo>> partition(List<UserInfo> users, int batchSize) {
+        List<List<UserInfo>> result = new ArrayList<>();
+        for (int i = 0; i < users.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, users.size());
+            result.add(users.subList(i, end));
+        }
+        return result;
+    }
+
+    private List<UserInfo> generateUsers(int size) {
+        List<UserInfo> users = new ArrayList<>();
+        for (int i = 1; i <= size; i++) {
+            UserInfo userInfo = new UserInfo();
+            userInfo.setName(UUID.randomUUID().toString());
+            userInfo.setSex(i % 2);
+            users.add(userInfo);
+        }
+        return users;
+    }
+
+    @PreDestroy
+    void shutdownPool() {
+        executor.shutdown();
     }
 }
